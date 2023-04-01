@@ -13,12 +13,20 @@ from telegram.ext import (
 )
 
 import openai
+
 openai.api_key = ""
 TELEGRAM_API_TOKEN = ''
 
 logging.basicConfig(level=logging.INFO)
 
 user_settings = {}
+
+def truncate_history(user_history, max_tokens):
+    tokens_count = 0
+    for msg in reversed(user_history):
+        tokens_count += len(msg["content"].split())
+        if tokens_count > max_tokens:
+            user_history.remove(msg)
 
 def main_menu_keyboard():
     keyboard = [
@@ -42,7 +50,7 @@ def restricted(func):
     def wrapped(update: Update, context: CallbackContext, *args, **kwargs):
         user_id = update.effective_user.id
         chat_type = update.effective_chat.type
-        
+
         if chat_type != "group" and chat_type != "supergroup" and user_id not in ALLOWED_USERS:
             restricted_access(update, context)
             return
@@ -63,7 +71,7 @@ def menu_button_handler(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
     user_id = query.from_user.id
-    
+
     if query.data == "settings":
         settings_query(query, context)
     elif query.data == "reset_context":
@@ -157,6 +165,9 @@ def chat_gpt_response(text, user_id, context, user_history):
     custom_context = context.user_data.get(user_id, {}).get('custom_context', 'You are a friendly and informal assistant.')
 
     user_history.append({'role': 'user', 'content': text})
+
+    truncate_history(user_history, 4096 - 1500)  # Reserve 1500 tokens for model's response
+
     all_messages = [{'role': 'system', 'content': custom_context}] + user_history
 
     response = openai.ChatCompletion.create(
@@ -217,7 +228,7 @@ def message_handler(update: Update, context: CallbackContext):
         user_history = get_user_history(user_id, context)
         user_history.append({'role': 'user', 'content': input_text})
         gpt_response = chat_gpt_response(input_text, user_id, context, user_history)
-        
+
         if chat_type in ("group", "supergroup"):
             escaped_response = escape_reserved_chars(gpt_response)
             user_history.append({'role': 'assistant', 'content': escaped_response})
@@ -246,23 +257,35 @@ def set_context(update, context):
     context.user_data[user_id]['custom_context'] = new_context
     update.message.reply_text(f'Контекст успешно изменен на: {new_context}')
 
+def show_context(update: Update, context: CallbackContext):
+    user_data = context.user_data
+    chat_data = context.chat_data
+    bot_data = context.bot_data
+
+    user_data_text = '\n'.join([f"{key}: {value}" for key, value in user_data.items()])
+    chat_data_text = '\n'.join([f"{key}: {value}" for key, value in chat_data.items()])
+    bot_data_text = '\n'.join([f"{key}: {value}" for key, value in bot_data.items()])
+
+    context_text = f"User data:\n{user_data_text}\n\nChat data:\n{chat_data_text}\n\nBot data:\n{bot_data_text}"
+    update.message.reply_text(f"Текущий контекст:\n{context_text}")
+
 def help(update, context):
     update.message.reply_text(
             f"Доступные команды:\n"
-			f"/help - Получить справку\n"
-			f"/resetchat Сброс чата на начальные настройки. Чат забудет историю и контекст. Переписка при этом останется на месте.\n"
+                        f"/help - Получить справку\n"
+                        f"/resetchat Сброс чата на начальные настройки. Чат забудет историю и контекст. Переписка при этом останется на месте.\n"
             f"/setcontext Тонкая настройка чата. Задает кем быть модели. Пример:\n"
-			f"* ты эксперт в истории ацтеков;\n"
+                        f"* ты эксперт в истории ацтеков;\n"
             f"* ты преподаватель математики;\n"
-			f"* ты специализируешься на предоставлении советов по путешествиям;\n"
-			f"* ты проффесиональный кино-критик\n; И Т.д.\n"
+                        f"* ты специализируешься на предоставлении советов по путешествиям;\n"
+                        f"* ты проффесиональный кино-критик\n; И Т.д.\n"
             f"/settemperature Для установки температуры от 0 до 1. Например: /settemperature 0.7\n"
-			f"Более высокие значения, такие как 0,8, сделают вывод более случайным, а более низкие значения,\n"
-			f"такие как 0,2, сделают его более сфокусированным и детерминированным.\n"
+                        f"Более высокие значения, такие как 0,8, сделают вывод более случайным, а более низкие значения,\n"
+                        f"такие как 0,2, сделают его более сфокусированным и детерминированным.\n"
             f"/setmaxtokens Для установки максимального количества токенов. Например: /setmaxtokens 1500\n"
-			f"\tМаксимальное количество токенов для генерации при завершении чата.\n"
+                        f"\tМаксимальное количество токенов для генерации при завершении чата.\n"
             f"\tОбщая длина входных и сгенерированных токенов ограничена длиной контекста модели.\n"
-			f"/settings - Показать текущие настройки\n"
+                        f"/settings - Показать текущие настройки\n"
             )
 
 def main():
@@ -272,9 +295,8 @@ def main():
     dp.add_handler(CommandHandler('start', start))
     dp.add_handler(CommandHandler('help', help))
     dp.add_handler(CommandHandler('settings', settings))
-    # dp.add_handler(CommandHandler('setmodel', set_model))
+    dp.add_handler(CommandHandler('showcontext', show_context))
     dp.add_handler(CommandHandler('settemperature', set_temperature))
-    dp.add_handler(CommandHandler('setmaxtokens', set_max_tokens))
     dp.add_handler(CommandHandler("resetchat", reset_context))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, message_handler, pass_user_data=True))
     dp.add_handler(CallbackQueryHandler(menu_button_handler))
