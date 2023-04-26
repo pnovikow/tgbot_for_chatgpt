@@ -13,20 +13,29 @@ from telegram.ext import (
 )
 
 import openai
+import tiktoken
 
 openai.api_key = ""
-TELEGRAM_API_TOKEN = ''
+TELEGRAM_API_TOKEN = ""
 
 logging.basicConfig(level=logging.INFO)
 
 user_settings = {}
 
-def truncate_history(user_history, max_tokens):
-    tokens_count = 0
-    for msg in reversed(user_history):
-        tokens_count += len(msg["content"].split())
-        if tokens_count > max_tokens:
-            user_history.remove(msg)
+def count_tokens(text: str, encoding_name: str) -> int:
+    """Returns the number of tokens in a text string."""
+    encoding = tiktoken.get_encoding(encoding_name)
+    num_tokens = len(encoding.encode(text))
+    return num_tokens
+
+def truncate_history(user_history, new_message, encoding_name="cl100k_base", response_reserve=500):
+    tokens_new_message = count_tokens(new_message, encoding_name=encoding_name)
+    while True:
+        tokens_count = sum([count_tokens(msg['content'], encoding_name=encoding_name) for msg in user_history]) + tokens_new_message + response_reserve
+        if tokens_count <= 3096:
+            break
+        user_history.pop(0)
+
 
 def main_menu_keyboard():
     keyboard = [
@@ -102,8 +111,18 @@ def get_user_settings(user_id, context):
     if 'user_settings' not in context.user_data:
         context.user_data['user_settings'] = {}
     if user_id not in context.user_data['user_settings']:
-        context.user_data['user_settings'][user_id] = {'model': 'gpt-3.5-turbo', 'temperature': 0.7, 'max_tokens': 1500}
+        context.user_data['user_settings'][user_id] = {'model': 'gpt-3.5-turbo', 'temperature': 0.7, 'max_tokens': 500}
     return context.user_data['user_settings'][user_id]
+
+def save_history(user_id, user_name, message, response, update, context):
+    user_data = context.user_data[user_id]
+    context.user_data['user_history'][user_id].append({'role': 'user', 'content': message})
+    context.user_data['user_history'][user_id].append({'role': 'assistant', 'content': response})
+
+    print(f"Saving history for user {user_id}")
+    with open(f"history/history_user_{user_name}_{user_id}.txt", "a", encoding="utf-8") as history_file:
+        history_file.write(f"User: {message}\n")
+        history_file.write(f"ChatGPT: {response}\n\n")
 
 @restricted
 def start(update: Update, context: CallbackContext):
@@ -139,6 +158,7 @@ def set_temperature(update: Update, context: CallbackContext):
     else:
         update.message.reply_text("Введите значение температуры после команды. Например: /settemperature 0.7")
 
+# @restricted
 def set_max_tokens(update: Update, context: CallbackContext):
     user_id = update.message.from_user.id
     max_tokens = int(context.args[0]) if context.args else None
@@ -165,8 +185,6 @@ def chat_gpt_response(text, user_id, context, user_history):
     custom_context = context.user_data.get(user_id, {}).get('custom_context', 'You are a friendly and informal assistant.')
 
     user_history.append({'role': 'user', 'content': text})
-
-    truncate_history(user_history, 4096 - 1500)  # Reserve 1500 tokens for model's response
 
     all_messages = [{'role': 'system', 'content': custom_context}] + user_history
 
@@ -227,22 +245,28 @@ def message_handler(update: Update, context: CallbackContext):
     try:
         user_history = get_user_history(user_id, context)
         user_history.append({'role': 'user', 'content': input_text})
-        gpt_response = chat_gpt_response(input_text, user_id, context, user_history)
+        tokens_count = count_tokens(" ".join([msg['content'] for msg in user_history]), encoding_name="cl100k_base")
+        truncate_history(user_history, input_text, encoding_name="cl100k_base")
 
+        gpt_response = chat_gpt_response(input_text, user_id, context, user_history)
+        
         if chat_type in ("group", "supergroup"):
             escaped_response = escape_reserved_chars(gpt_response)
             user_history.append({'role': 'assistant', 'content': escaped_response})
+            save_history(user_id, user_name, input_text, escaped_response, update, context)
+            update.message.reply_text(f"{user_mention}, {escaped_response}, \n\nКоличество токенов в текущем диалоге: {tokens_count}  ", parse_mode="MarkdownV2")
 
         else:
             user_history.append({'role': 'assistant', 'content': gpt_response})
-
-        if chat_type in ("group", "supergroup"):
-            update.message.reply_text(f"{user_mention}, {escaped_response}", parse_mode="MarkdownV2")
-        else:
+            save_history(user_id, user_name, input_text, gpt_response, update, context)
+            update.message.reply_text(f"\nКоличество токенов в текущем диалоге: {tokens_count}")
             update.message.reply_text(gpt_response)
+
     except Exception as e:
         logging.error(e)
-        update.message.reply_text('Извините, произошла ошибка при обработке вашего сообщения.')
+        tokens_count = count_tokens(" ".join([msg['content'] for msg in user_history]), encoding_name="cl100k_base")
+        update.message.reply_text(f"\nКоличество токенов в текущем диалоге: {tokens_count}")
+        context.bot.send_message(chat_id=user_id, text=f"Sorry, I couldn't process your request. The error message is: {e}")
 
 def set_context(update, context):
     new_context = ' '.join(context.args)
